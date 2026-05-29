@@ -316,8 +316,26 @@ class PEE_RAP_ATTACK(object):
 
 
 def compute_predict_error(image: torch.Tensor):
+    """
+    Compute prediction error for PEE embedding/extraction.
+
+    修复点：
+    原始代码在 224x224 输入下会生成 223x223 的 predict_error，
+    导致 pee_embed / pee_extract 中 predict_error 与 image 尺寸不匹配。
+
+    本版本保证：
+        predict_error.shape == image.shape
+
+    输入:
+        image: [B, 1, H, W]
+
+    输出:
+        predict_error: [B, 1, H, W]
+    """
     device = image.device
     dtype = image.dtype
+
+    _, _, h, w = image.shape
 
     kernel = torch.zeros(1, 1, 3, 3, device=device, dtype=dtype)
     kernel[..., 0, 1] = 0.25
@@ -328,62 +346,80 @@ def compute_predict_error(image: torch.Tensor):
     center_kernel = torch.zeros_like(kernel)
     center_kernel[..., 1, 1] = 1
 
+    # 第一组采样网格
     predict_image_1 = torch.ceil(
         F.conv2d(image, kernel, stride=2, padding=0)
     )
+
+    grid_image_1 = F.conv2d(
+        image,
+        center_kernel,
+        stride=2,
+        padding=0
+    )
+
+    predict_error_1 = grid_image_1 - predict_image_1
+
+    predict_error_1 = F.conv_transpose2d(
+        predict_error_1,
+        center_kernel,
+        stride=2
+    )
+
+    # 第二组交错采样网格
     predict_image_2 = torch.ceil(
         F.conv2d(image[..., 1:-1, 1:-1], kernel, stride=2, padding=0)
     )
 
-    grid_image_1 = F.conv2d(image, center_kernel, stride=2, padding=0)
-    grid_image_2 = F.conv2d(image[..., 1:-1, 1:-1], center_kernel, stride=2, padding=0)
-
-    predict_error_1 = grid_image_1 - predict_image_1
-    predict_error_1 = F.conv_transpose2d(predict_error_1, center_kernel, stride=2)
+    grid_image_2 = F.conv2d(
+        image[..., 1:-1, 1:-1],
+        center_kernel,
+        stride=2,
+        padding=0
+    )
 
     predict_error_2 = grid_image_2 - predict_image_2
-    predict_error_2 = F.conv_transpose2d(predict_error_2, center_kernel, stride=2)
-    predict_error_2 = F.pad(predict_error_2, (1, 1, 1, 1), mode="constant", value=0)
 
-    return predict_error_1 + predict_error_2
+    predict_error_2 = F.conv_transpose2d(
+        predict_error_2,
+        center_kernel,
+        stride=2
+    )
 
+    predict_error_2 = F.pad(
+        predict_error_2,
+        (1, 1, 1, 1),
+        mode="constant",
+        value=0
+    )
 
-def pee_embed(image: torch.Tensor, info=None):
-    if info is None:
-        info = []
+    predict_error = predict_error_1 + predict_error_2
 
-    with torch.no_grad():
-        predict_error = compute_predict_error(image)
+    # ------------------------------------------------------------
+    # 核心修复：
+    # conv2d + conv_transpose2d 在偶数尺寸输入下可能得到 H-1, W-1。
+    # 例如 224 -> 223。
+    # 这里统一补齐或裁剪到原始 image 尺寸。
+    # ------------------------------------------------------------
+    pe_h, pe_w = predict_error.shape[-2:]
 
-        flat_error = predict_error.flatten()
-        unique_values, counts = torch.unique(flat_error, return_counts=True)
-        max_bin = unique_values[counts.argmax()]
-        a = max_bin - 1
-        b = max_bin + 1
+    pad_h = h - pe_h
+    pad_w = w - pe_w
 
-        embed_image = image.clone()
+    if pad_h > 0 or pad_w > 0:
+        predict_error = F.pad(
+            predict_error,
+            (
+                0, max(pad_w, 0),
+                0, max(pad_h, 0)
+            ),
+            mode="constant",
+            value=0
+        )
 
-        # Process histogram shifting first.
-        embed_image = torch.where(predict_error > b, embed_image + 1, embed_image)
-        embed_image = torch.where(predict_error < a, embed_image - 1, embed_image)
+    predict_error = predict_error[..., :h, :w]
 
-        # Find embeddable positions where e == a.
-        candidate_mask = (predict_error == a)
-        candidate_idx = candidate_mask.flatten().nonzero(as_tuple=False).flatten()
-
-        n = min(len(info), candidate_idx.numel())
-        if n > 0:
-            info_tensor = torch.tensor(
-                info[:n],
-                device=image.device,
-                dtype=image.dtype
-            )
-
-            flat_embed = embed_image.flatten()
-            flat_embed[candidate_idx[:n]] -= info_tensor
-            embed_image = flat_embed.view_as(image)
-
-        return embed_image.clamp(0, 255)
+    return predict_error
 
 
 def pee_extract(image: torch.Tensor, info_len=0):
