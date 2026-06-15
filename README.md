@@ -17,26 +17,18 @@ Run the demo script with an input image and its ImageNet label:
 
 ```bash
 python attack_demo.py \
-  --image_path ./test.jpg \
-  --label 281 \
+  --image_path ./test.JPEG \
+  --label 999 \
   --output_dir ./outputs \
   --cls_model resnet50 \
-  --image_size 224 \
-  --block_size 16 \
-  --mask_num 8 \
+  --image_size 225 \
+  --block_size 5 \
+  --mask_num 256 \
   --quant_step 4 \
-  --max_epoch 20
+  --max_epoch 20 \
+  --device cuda
 ```
 
-For CPU execution:
-
-```bash
-python attack_demo.py \
-  --image_path ./test.jpg \
-  --label 281 \
-  --output_dir ./outputs \
-  --device cpu
-```
 
 ## Arguments
 
